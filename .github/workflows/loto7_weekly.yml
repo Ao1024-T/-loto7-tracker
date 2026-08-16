@@ -1,0 +1,38 @@
+name: ロト7 週次自動分析
+
+# 実行タイミング:
+#   毎週金曜 20:30 JST (= 11:30 UTC) に自動実行
+#   → ロト7の抽選結果は金曜20時前後にデータ更新されるため、少し余裕を見て30分後に設定
+#   「Actions」タブから手動実行 (workflow_dispatch) も可能
+on:
+  schedule:
+    - cron: '30 11 * * 5'
+  workflow_dispatch:
+
+jobs:
+  analyze:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: リポジトリをチェックアウト
+        uses: actions/checkout@v4
+
+      - name: Pythonをセットアップ
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: 依存ライブラリをインストール
+        run: pip install requests pandas
+
+      - name: 分析を実行
+        run: python weekly_analysis.py
+
+      - name: レポートをコミット・プッシュ
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add reports/
+          git diff --cached --quiet || git commit -m "週次レポート自動更新: $(date +'%Y-%m-%d')"
+          git push
