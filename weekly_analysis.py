@@ -4,15 +4,25 @@
 
 やること:
 1. 最新の当選番号データを取得
-2. (prediction.txt があれば) 今回の予想数字と実際の当選番号とのズレを比較
+2. prediction_log.csv の一番下の行(=最新の予想)と実際の当選番号とのズレを比較
 3. 今回の当選番号と「本数字の一致が多い」過去の回を探し、その翌週の結果を一覧化
-4. 結果を Markdown レポートとして reports/ フォルダに保存
+4. 結果を Markdown レポートとして reports/loto7_report_日付.md に保存
+   (同時に reports/latest.md にも上書き保存。Webアプリはこの latest.md を読みに行く)
+
+prediction_log.csv の書き方（1行 = 1口の予想。同じ日付で複数行あってもOK。古い行は消さずに、下に追記していく）:
+    2026-08-14,3,7,12,18,24,29,35
+    2026-08-14,2,9,14,19,25,30,36
+    2026-08-21,4,10,15,21,28,32,36
+
+  → この例だと 8/14 の抽選には2口(3,7,12,18,24,29,35 と 2,9,14,19,25,30,36)、
+    8/21 の抽選には1口だけ予想したことになる。
+  → スクリプトは「一番新しい日付」に紐づく行を全部拾って、それぞれの一致数を表示する。
 
 使い方:
-    # その場で予想数字を渡す場合
+    # その場で予想数字を渡す場合(1口のみ。prediction_log.csvより優先される)
     python weekly_analysis.py --predicted 3 7 12 18 24 29 35
 
-    # 事前に prediction.txt (例: "3,7,12,18,24,29,35") を用意しておく場合
+    # prediction_log.csv の最新日付の行(複数可)を自動で使う場合
     python weekly_analysis.py
 
 必要なライブラリ:
@@ -79,18 +89,38 @@ def find_similar_draws(df: pd.DataFrame, target_idx: int, top_n: int = 5):
     return results
 
 
-def load_prediction(cli_predicted):
+def load_predictions(cli_predicted):
+    """予想数字のリストを取得する(1週に複数口ある場合はリストのリストで返す)。
+    優先順位: 1) CLIの--predicted (1口のみ)  2) prediction_log.csv の最新日付の全行
+    prediction_log.csv の1行は "日付,数字1,...,数字7" の形式。
+    """
     if cli_predicted:
-        return list(cli_predicted)
-    if os.path.exists("prediction.txt"):
-        with open("prediction.txt", encoding="utf-8") as f:
-            content = f.read().strip()
-        if content:
-            return [int(x) for x in content.split(",")]
+        return [list(cli_predicted)]
+
+    if os.path.exists("prediction_log.csv"):
+        with open("prediction_log.csv", encoding="utf-8") as f:
+            lines = [line.strip() for line in f if line.strip()]
+
+        parsed = []  # [(date_str, [n1..n7]), ...]
+        for line in lines:
+            parts = line.split(",")
+            if len(parts) < 8:
+                continue
+            try:
+                numbers = [int(x) for x in parts[1:8]]
+            except ValueError:
+                print(f"警告: prediction_log.csv の行の形式が不正です: {line}")
+                continue
+            parsed.append((parts[0], numbers))
+
+        if parsed:
+            latest_date = parsed[-1][0]  # 一番下の行の日付を「今週」とみなす
+            return [numbers for date, numbers in parsed if date == latest_date]
+
     return None
 
 
-def build_report(df: pd.DataFrame, predicted) -> str:
+def build_report(df: pd.DataFrame, predictions) -> str:
     latest_idx = len(df) - 1
     latest = df.loc[latest_idx]
     actual_numbers = set(int(latest[c]) for c in MAIN_COLS)
@@ -103,16 +133,17 @@ def build_report(df: pd.DataFrame, predicted) -> str:
     lines.append(f"- ボーナス数字: {int(latest['BONUS数字1'])}, {int(latest['BONUS数字2'])}")
     lines.append("")
 
-    if predicted:
-        predicted_set = set(predicted)
-        matched = predicted_set & actual_numbers
-        lines.append("## 今回の予想とのズレ")
-        lines.append(f"- 予想した数字: {sorted(predicted_set)}")
-        lines.append(f"- 一致した数字: {sorted(matched)}（{len(matched)}個 / 7個中）")
+    lines.append("## 今回の予想とのズレ")
+    if predictions:
+        for i, predicted in enumerate(predictions, start=1):
+            predicted_set = set(predicted)
+            matched = predicted_set & actual_numbers
+            label = f"予想{i}" if len(predictions) > 1 else "予想"
+            lines.append(f"- {label}: {sorted(predicted_set)}")
+            lines.append(f"  → 一致した数字: {sorted(matched)}（{len(matched)}個 / 7個中）")
         lines.append("")
     else:
-        lines.append("## 今回の予想とのズレ")
-        lines.append("- (predicted オプション、または prediction.txt が未指定のためスキップ)")
+        lines.append("- (prediction_log.csv が未設定のためスキップ)")
         lines.append("")
 
     lines.append(f"## 今回と似た過去の回 TOP5（本数字の一致数が多い順）とその翌週の結果")
@@ -144,16 +175,23 @@ def main():
     args = parser.parse_args()
 
     df = fetch_data()
-    predicted = load_prediction(args.predicted)
-    report = build_report(df, predicted)
+    predictions = load_predictions(args.predicted)
+    report = build_report(df, predictions)
 
     print(report)
 
     os.makedirs("reports", exist_ok=True)
+
     filename = f"reports/loto7_report_{datetime.date.today()}.md"
     with open(filename, "w", encoding="utf-8") as f:
         f.write(report)
     print(f"\n保存しました -> {filename}")
+
+    # Webアプリが常に同じURLで最新レポートを取得できるよう、固定名でも上書き保存
+    latest_path = "reports/latest.md"
+    with open(latest_path, "w", encoding="utf-8") as f:
+        f.write(report)
+    print(f"保存しました -> {latest_path}")
 
 
 if __name__ == "__main__":
